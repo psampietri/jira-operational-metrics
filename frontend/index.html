@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 
+      THIS IS THE FIX: 
+      We are loading Tailwind via the Play CDN script.
+      This script will scan the page for Tailwind classes and apply styles.
+      This bypasses the need for PostCSS or importing 'index.css'.
+    -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Jira Metrics Dashboard</title>
+  </head>
+  <body class="bg-gray-100">
+    <div id="root"></div>
+    <!-- 
+      This remains the entry point for your React app.
+      Ensure your 'frontend/src/main.jsx' file DOES NOT 
+      import './index.css'.
+    -->
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
