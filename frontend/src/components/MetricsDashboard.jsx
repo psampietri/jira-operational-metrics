@@ -1,27 +1,20 @@
 /*
  * JiraMetricsDashboard - MetricsDashboard.jsx
  *
- * This component displays the calculated metrics:
- * - Status Distribution (as a pie chart)
- * - The detailed Time In Status Table
- *
- * It also handles the loading and error states for the dashboard area.
+ * Displays metrics in tabs: Summary Cards, Flow Metrics, Current State.
+ * Passes detailed data to TimeInStatusTable for drilldown.
  */
 
-import React from 'react';
-import TimeInStatusTable from './TimeInStatusTable';
-// --- UPDATED: Import Recharts components for Pie Chart ---
+import React, { useState } from 'react';
+import TimeInStatusTable from './TimeInStatusTable.jsx'; // Ensure correct path
 import {
-    ResponsiveContainer,
-    PieChart,
-    Pie,
-    Cell, // Needed for coloring slices
-    Tooltip,
-    Legend
+  ResponsiveContainer, PieChart, Pie, Cell, Tooltip, Legend, AreaChart, Area,
+  BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
 
-// A simple loading spinner component
-// ... (LoadingSpinner component remains the same)
+// --- Helper Components ---
+// Defined properly now
+
 const LoadingSpinner = () => (
     <div className="flex h-64 items-center justify-center">
         <div
@@ -33,179 +26,270 @@ const LoadingSpinner = () => (
     </div>
 );
 
-
-// A simple card component for displaying stats
-// ... (StatCard component remains the same)
 const StatCard = ({ title, value, subtext }) => (
-    <div className="flex-1 rounded-lg bg-white p-4 shadow">
-        <div className="text-sm font-medium text-gray-500">{title}</div>
+    <div className="flex-1 rounded-lg bg-white p-4 shadow min-w-[150px]"> {/* Added min-width */}
+        <div className="text-sm font-medium text-gray-500 truncate">{title}</div> {/* Added truncate */}
         <div className="mt-1 text-3xl font-semibold text-gray-900">{value}</div>
         {subtext && <div className="text-sm text-gray-400">{subtext}</div>}
     </div>
 );
 
+// --- Charting Helpers ---
 
-// --- ADDED: Colors for Pie Chart Slices ---
-// (You can expand this list or use a color generation library for more groups)
 const COLORS = [
-    '#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#AF19FF',
-    '#FF1919', '#3B82F6', '#10B981', '#F59E0B', '#EF4444',
-    '#8B5CF6', '#EC4899', '#6EE7B7', '#FCD34D', '#F87171'
+  '#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#AF19FF',
+  '#FF1919', '#3B82F6', '#10B981', '#F59E0B', '#EF4444',
+  '#8B5CF6', '#EC4899', '#6EE7B7', '#FCD34D', '#F87171'
 ];
 
-// --- ADDED: Custom Tooltip for Pie Chart ---
 const CustomPieTooltip = ({ active, payload }) => {
-    if (active && payload && payload.length) {
-        const data = payload[0].payload; // Access the full data point for the slice
-        return (
-            <div className="rounded border bg-white p-2 text-sm shadow">
-                <p className="font-bold">{data.name}</p> {/* Status Group Name */}
-                <p className="text-blue-600">{`Count: ${data.count}`}</p>
-                <p className="text-gray-600">{`Percentage: ${data.percentage.toFixed(1)}%`}</p>
-            </div>
-        );
-    }
-    return null;
+  if (active && payload && payload.length) {
+    const data = payload[0].payload;
+    return (
+      <div className="rounded border bg-white p-2 text-sm shadow">
+        <p className="font-bold">{data.name}</p>
+        <p className="text-blue-600">{`Count: ${data.count}`}</p>
+        <p className="text-gray-600">{`Percentage: ${data.percentage?.toFixed(1) ?? 0}%`}</p> {/* Added optional chaining and default */}
+      </div>
+    );
+  }
+  return null;
 };
 
-// --- ADDED: Custom Label for Pie Chart Slices ---
+const CustomChartTooltip = ({ active, payload, label }) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="rounded border bg-white p-2 text-sm shadow">
+        <p className="font-bold">{label}</p>
+        {payload.map((entry, index) => (
+          <p
+            key={`item-${index}`}
+            style={{ color: entry.color || entry.fill }}
+          >
+            {/* Added check for entry.value */}
+            {`${entry.name}: ${
+              typeof entry.value === 'number' && entry.value.toFixed ? entry.value.toFixed(2) : entry.value ?? 'N/A'
+            }`}
+          </p>
+        ))}
+      </div>
+    );
+  }
+  return null;
+};
+
 const RADIAN = Math.PI / 180;
-const renderCustomizedLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, index, name, count }) => {
-    // Only show labels for slices > a certain percentage to avoid clutter
-    if (percent * 100 < 3) {
+const renderCustomizedPieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, name }) => {
+    if ((percent ?? 0) * 100 < 5) { // Added default for percent
         return null;
     }
-    const radius = innerRadius + (outerRadius - innerRadius) * 0.5; // Position label halfway
-    // Use slightly larger radius for label line end
-    const radiusLineEnd = innerRadius + (outerRadius - innerRadius) * 0.7;
-    const x = cx + radiusLineEnd * Math.cos(-midAngle * RADIAN);
-    const y = cy + radiusLineEnd * Math.sin(-midAngle * RADIAN);
-    const xLabel = cx + (outerRadius + 15) * Math.cos(-midAngle * RADIAN); // Position text outside
-    const yLabel = cy + (outerRadius + 15) * Math.sin(-midAngle * RADIAN);
-    const textAnchor = xLabel > cx ? 'start' : 'end';
+    const radius = innerRadius + (outerRadius - innerRadius) * 0.6;
+    const x = cx + radius * Math.cos(-midAngle * RADIAN);
+    const y = cy + radius * Math.sin(-midAngle * RADIAN);
 
     return (
-        <g>
-            {/* Line from slice towards label */}
-            <path d={`M${cx},${cy}L${x},${y}`} stroke="#6b7280" fill="none" />
-            <circle cx={x} cy={y} r={2} fill="#6b7280" stroke="none" />
-            {/* Text Label */}
-            <text x={xLabel} y={yLabel} fill="#374151" textAnchor={textAnchor} dominantBaseline="central" fontSize={12}>
-                {`${name} (${(percent * 100).toFixed(0)}%)`}
-            </text>
-        </g>
-
+        <text x={x} y={y} fill="white" textAnchor={x > cx ? 'start' : 'end'} dominantBaseline="central" fontSize={12} fontWeight="bold">
+            {`${((percent ?? 0) * 100).toFixed(0)}%`}
+        </text>
     );
 };
+// --- End Helper Components & Charting Helpers ---
 
 
-function MetricsDashboard({ processedData, isLoading, error, totalIssues }) {
-    // Ensure totalIssues is a non-negative number
-    const validTotalIssues = Math.max(0, totalIssues || 0);
+function MetricsDashboard({
+    processedData,
+    isLoading,
+    error,
+    groupOrder = [], // Added default empty array
+    statusMap,
+    statusGroups
+}) {
+  const [activeTab, setActiveTab] = useState('flow');
 
-    if (isLoading) {
-        return (
+  // Loading State
+  if (isLoading) {
+      return (
+          <div className="rounded-lg bg-white p-6 shadow-lg">
+              <LoadingSpinner />
+          </div>
+      );
+  }
+
+  // Error State (only show if not loading)
+  if (error && !isLoading) {
+      return (
+          <div className="rounded-md border border-red-300 bg-red-50 p-4 text-red-700 shadow-lg" role="alert">
+              <strong className="font-bold">Error: </strong>
+              <span className="block sm:inline">{String(error)}</span>
+          </div>
+      );
+  }
+
+  // Initial/Empty State (only show if not loading and no error)
+  if (!processedData && !isLoading && !error) {
+      return (
+          <div className="rounded-lg bg-white p-6 text-center text-gray-500 shadow-lg">
+              Please load a project, configure status groups/flow points, and click "Load Ticket Data".
+          </div>
+      );
+   }
+
+  // Data Loaded State - Proceed only if processedData is valid
+  if (!processedData) return null; // Should be covered above, but safe fallback
+
+  const {
+    distribution, // { byStatus, byGroup }
+    timeInStatus, // { byStatus, byGroup }
+    cycleTimeData = {}, // Provide defaults
+    throughputData = [], // Provide defaults
+    cfdData = [], // Provide defaults
+    summaryStats = {}, // Provide defaults
+    supportMetrics = {}, // Provide defaults
+  } = processedData;
+
+  // Helper to get color
+  const getGroupColor = (groupName) => {
+      const index = groupOrder.indexOf(groupName);
+      // Fallback color if groupOrder is empty or name not found
+      return index > -1 ? COLORS[index % COLORS.length] : '#8884d8';
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* --- Stat Cards --- */}
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+        {/* Use optional chaining and provide defaults */}
+        <StatCard title="MTTA" value={`${(supportMetrics.avgMttaHours ?? 0).toFixed(1)}h`} subtext="Mean Time to Acknowledge"/>
+        <StatCard title="MTTR" value={`${(supportMetrics.avgMttrHours ?? 0).toFixed(1)}h`} subtext="Mean Time to Resolution"/>
+        <StatCard title="Avg Cycle (Work)" value={`${(summaryStats.avgCycleTime ?? 0).toFixed(1)}d`} subtext="In Progress to Resolved"/>
+        <StatCard title="Median Cycle (Work)" value={`${(summaryStats.p50CycleTime ?? 0).toFixed(1)}d`} subtext="50% finish within (days)"/>
+        <StatCard title="85th % Cycle (Work)" value={`${(summaryStats.p85CycleTime ?? 0).toFixed(1)}d`} subtext="85% finish within (days)"/>
+        <StatCard title="Current WIP" value={summaryStats.currentWIP ?? 0} subtext="Issues In Progress"/>
+      </div>
+
+      {/* --- Tab Navigation --- */}
+      <div className="border-b border-gray-200">
+        <nav className="-mb-px flex space-x-6" aria-label="Tabs">
+           <button onClick={() => setActiveTab('flow')} className={`whitespace-nowrap border-b-2 px-1 py-4 text-sm font-medium ${ activeTab === 'flow' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700' }`} > Flow & Cycle Time </button>
+           <button onClick={() => setActiveTab('current')} className={`whitespace-nowrap border-b-2 px-1 py-4 text-sm font-medium ${ activeTab === 'current' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700' }`} > Current State </button>
+        </nav>
+      </div>
+
+      {/* --- Tab Content --- */}
+      <div className="space-y-6">
+        {/* --- Flow Metrics Tab --- */}
+        {activeTab === 'flow' && (
+          <>
+            {/* CFD */}
             <div className="rounded-lg bg-white p-6 shadow-lg">
-                <LoadingSpinner />
-            </div>
-        );
-    }
-
-    if (error) {
-        console.log('[MetricsDashboard] Rendering error message:', error);
-        return (
-            <div
-                className="rounded-md border border-red-300 bg-red-50 p-4 text-red-700 shadow-lg"
-                role="alert"
-            >
-                <strong className="font-bold">Error: </strong>
-                <span className="block sm:inline">{String(error)}</span>
-            </div>
-        );
-    }
-
-    // Check specifically if processedData is null or lacks expected structure
-    if (!processedData || !Array.isArray(processedData.distribution) || !Array.isArray(processedData.timeInStatusTable)) {
-        return (
-            <div className="rounded-lg bg-white p-6 text-center text-gray-500 shadow-lg">
-                {validTotalIssues === 0 && !isLoading
-                    ? 'Found 0 issues matching your criteria. Adjust your filters and try again.'
-                    : 'Please apply filters or wait for data to load metrics.'}
-            </div>
-        );
-    }
-
-    const { distribution, timeInStatusTable } = processedData;
-
-    // No sorting needed for pie chart data generally, unless you want consistent slice order
-
-    // Calculate total hours safely
-    const totalHours = Array.isArray(timeInStatusTable)
-        ? timeInStatusTable.reduce((acc, row) => acc + ((row && typeof row.totalHours === 'number') ? row.totalHours : 0), 0)
-        : 0;
-    // Calculate average hours safely
-    const avgHours = validTotalIssues > 0 ? (totalHours / validTotalIssues).toFixed(2) : '0.00';
-
-
-    return (
-        <div className="space-y-6">
-            {/* --- Stat Cards --- */}
-            <div className="flex flex-col gap-4 sm:flex-row">
-                <StatCard title="Total Issues" value={validTotalIssues} />
-                <StatCard
-                    title="Avg. Time (All Groups)"
-                    value={`${avgHours}h`}
-                    subtext="Total hours / Total issues"
-                />
-            </div>
-
-            {/* --- Status Distribution (Pie Chart) --- */}
-            <div className="rounded-lg bg-white p-6 shadow-lg">
-                <h2 className="mb-4 text-xl font-semibold text-gray-800">
-                    Current Status Distribution
-                </h2>
-                {Array.isArray(distribution) && distribution.length > 0 ? (
-                    // --- REPLACED Bar Chart with Pie Chart ---
-                    <div style={{ width: '100%', height: 400 }}> {/* Adjust height as needed */}
+                <h2 className="mb-4 text-xl font-semibold text-gray-800">Cumulative Flow Diagram</h2>
+                {cfdData && cfdData.length > 0 ? (
+                    <div style={{ width: '100%', height: 400 }}>
                         <ResponsiveContainer width="100%" height="100%">
-                            <PieChart>
-                                <Pie
-                                    data={distribution}
-                                    cx="50%" // Center X
-                                    cy="50%" // Center Y
-                                    labelLine={false} // Disable default label lines, using custom
-                                    label={renderCustomizedLabel} // Use custom label function
-                                    outerRadius={120} // Adjust size of pie
-                                    fill="#8884d8"
-                                    dataKey="count" // Size slices based on count
-                                    nameKey="name" // Use group name for labels/tooltips
-                                >
-                                    {distribution.map((entry, index) => (
-                                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                                    ))}
-                                </Pie>
-                                <Tooltip content={<CustomPieTooltip />} />
-                                {/* Optional Legend: Can be cluttered. Consider removing if too many items */}
-                                {/* <Legend layout="vertical" align="right" verticalAlign="middle" iconSize={10} wrapperStyle={{ fontSize: '12px' }}/> */}
-                            </PieChart>
+                            <AreaChart data={cfdData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="date" fontSize={12} />
+                                <YAxis label={{ value: 'Issue Count', angle: -90, position: 'insideLeft' }} />
+                                <Tooltip content={<CustomChartTooltip />} />
+                                <Legend />
+                                {groupOrder.map((groupName) => (
+                                    <Area key={groupName} type="monotone" dataKey={groupName} name={groupName} stackId="1"
+                                          stroke={getGroupColor(groupName)} fill={getGroupColor(groupName)} fillOpacity={0.7} connectNulls={false} />
+                                ))}
+                            </AreaChart>
                         </ResponsiveContainer>
                     </div>
-                ) : (
-                    <p className="text-gray-500">No distribution data available.</p>
-                )}
-                {/* --- END Pie Chart Replacement --- */}
+                ) : ( <p className="text-gray-500">No CFD data available. Check date range and group configuration.</p> )}
             </div>
 
-
-            {/* --- Time In Status Table --- */}
+            {/* Cycle Time Histogram */}
             <div className="rounded-lg bg-white p-6 shadow-lg">
-                <h2 className="mb-4 text-xl font-semibold text-gray-800">
-                    Average Time Spent in Status (per Issue)
-                </h2>
-                <TimeInStatusTable data={timeInStatusTable} totalIssues={validTotalIssues} />
+                <h2 className="mb-4 text-xl font-semibold text-gray-800">Cycle Time Histogram (Work: Start to End Point)</h2>
+                {cycleTimeData?.histogram && cycleTimeData.histogram.length > 0 ? (
+                    <div style={{ width: '100%', height: 300 }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={cycleTimeData.histogram} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="range" fontSize={12} />
+                                <YAxis allowDecimals={false} label={{ value: 'Issue Count', angle: -90, position: 'insideLeft' }} />
+                                <Tooltip content={<CustomChartTooltip />} />
+                                <Bar dataKey="count" name="Issues" fill="#3B82F6" />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                ) : ( <p className="text-gray-500">No cycle time data available. Ensure Start/End points are configured and issues completed the cycle.</p> )}
             </div>
-        </div>
-    );
+
+            {/* Throughput */}
+            <div className="rounded-lg bg-white p-6 shadow-lg">
+                <h2 className="mb-4 text-xl font-semibold text-gray-800">Throughput (Completed Issues per Day)</h2>
+                {throughputData && throughputData.length > 0 ? (
+                    <div style={{ width: '100%', height: 300 }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={throughputData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="date" fontSize={12} />
+                                <YAxis allowDecimals={false} label={{ value: 'Issues Completed', angle: -90, position: 'insideLeft' }}/>
+                                <Tooltip content={<CustomChartTooltip />} />
+                                <Legend />
+                                <Line type="monotone" dataKey="count" name="Completed" stroke="#10B981" strokeWidth={2} dot={true} activeDot={{ r: 6 }}/>
+                            </LineChart>
+                        </ResponsiveContainer>
+                    </div>
+                ) : ( <p className="text-gray-500">No throughput data available. Ensure End point is configured and issues were completed in the date range.</p> )}
+            </div>
+          </>
+        )}
+
+        {/* --- Current State Tab --- */}
+        {activeTab === 'current' && (
+          <>
+            {/* Distribution Pie Chart (Uses Group Data) */}
+            <div className="rounded-lg bg-white p-6 shadow-lg">
+              <h2 className="mb-4 text-xl font-semibold text-gray-800">
+                Current Status Distribution (by Group)
+              </h2>
+              {distribution?.byGroup && distribution.byGroup.some(d => d.count > 0) ? (
+                <div style={{ width: '100%', height: 400 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={distribution.byGroup.filter((d) => d.count > 0)}
+                        cx="50%" cy="50%" labelLine={false} label={renderCustomizedPieLabel}
+                        outerRadius={150} fill="#8884d8" dataKey="count" nameKey="name"
+                      >
+                        {distribution.byGroup
+                            .filter((d) => d.count > 0)
+                            .map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={getGroupColor(entry.name)}/>
+                        ))}
+                      </Pie>
+                      <Tooltip content={<CustomPieTooltip />} />
+                      <Legend layout="horizontal" align="center" verticalAlign="bottom" wrapperStyle={{paddingTop: '20px'}}/> {/* Adjusted Legend */}
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : ( <p className="text-gray-500">No distribution data available.</p> )}
+            </div>
+
+            {/* Time In Status Table */}
+            <div className="rounded-lg bg-white p-6 shadow-lg">
+              <h2 className="mb-4 text-xl font-semibold text-gray-800">
+                Average Time Spent in Status (per Issue)
+              </h2>
+              {/* Ensure necessary props are passed, provide defaults */}
+              <TimeInStatusTable
+                timeData={timeInStatus} // Pass object { byStatus, byGroup }
+                totalIssues={summaryStats?.totalIssues ?? 0}
+                statusMap={statusMap ?? new Map()} // Pass map or empty map
+                statusGroups={statusGroups ?? []} // Pass groups or empty array
+              />
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default MetricsDashboard;

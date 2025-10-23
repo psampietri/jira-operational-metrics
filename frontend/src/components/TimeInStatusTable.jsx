@@ -1,95 +1,147 @@
 /*
  * JiraMetricsDashboard - TimeInStatusTable.jsx
  *
- * Displays the detailed time-in-status metrics in a table format.
+ * Displays time-in-status metrics, aggregated by Group,
+ * with expandable rows to show details per individual Status.
  */
 
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 
-function TimeInStatusTable({ data, totalIssues }) {
-    // Add checks for data integrity
-   if (!data || !Array.isArray(data) || data.length === 0) {
-    return <p className="text-gray-500">No time-in-status data available.</p>;
-   }
-    // Ensure totalIssues is a non-negative number
-   const validTotalIssues = Math.max(0, totalIssues || 0);
-
-
-  // Calculate averages, ensuring validTotalIssues is used
-   const tableData = data.map((row) => {
-     // Check if row and necessary properties exist
-     const totalHours = row && typeof row.totalHours === 'number' ? row.totalHours : 0;
-     const totalDays = row && typeof row.totalDays === 'number' ? row.totalDays : 0;
-     return {
-       ...row,
-       // Use validTotalIssues for division, handle division by zero
-       avgHours: validTotalIssues > 0 ? totalHours / validTotalIssues : 0,
-       avgDays: validTotalIssues > 0 ? totalDays / validTotalIssues : 0,
-       // Ensure totalHours and totalDays are numbers for display
-       totalHours: totalHours,
-       totalDays: totalDays,
-       groupName: (row && row.groupName) || 'Unnamed Group' // Provide default name
-     };
-    });
+// Simple arrow icon for expand/collapse
+const ExpandIcon = ({ expanded }) => (
+    <svg className={`inline-block h-4 w-4 transform transition-transform duration-150 ${expanded ? 'rotate-90' : 'rotate-0'}`} fill="currentColor" viewBox="0 0 20 20">
+        <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+    </svg>
+);
 
 
-  return (
-    <div className="overflow-x-auto">
-      <div className="inline-block min-w-full align-middle">
-        <div className="overflow-hidden rounded-lg border shadow">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500"
-                >
-                  Status Group
-                </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500"
-                >
-                  Avg. Time (Hours)
-                </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500"
-                >
-                  Avg. Time (Days)
-                </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500"
-                >
-                  Total Time (Hours)
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200 bg-white">
-              {tableData.map((row, index) => (
-                 // Use groupName and index for a more robust key
-                 <tr key={`${row.groupName}-${index}`} className="hover:bg-gray-50">
-                  <td className="whitespace-nowrap px-6 py-4 text-sm font-medium text-gray-900">
-                    {row.groupName}
-                  </td>
-                  <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-700">
-                    {(typeof row.avgHours === 'number' ? row.avgHours : 0).toFixed(2)}
-                  </td>
-                  <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-700">
-                    {(typeof row.avgDays === 'number' ? row.avgDays : 0).toFixed(2)}
-                  </td>
-                  <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">
-                    {(typeof row.totalHours === 'number' ? row.totalHours : 0).toFixed(2)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+function TimeInStatusTable({
+    timeData, // Expects { byStatus: [...], byGroup: [...] }
+    totalIssues,
+    statusMap, // Map<string, string> statusId -> statusName (for lookup)
+    statusGroups // Array<{ name: string, statuses: string[] }> (for finding statuses in a group)
+}) {
+    const [expandedGroups, setExpandedGroups] = useState(new Set());
+
+    // --- Input Validation ---
+    if (!timeData || !Array.isArray(timeData.byGroup) || !Array.isArray(timeData.byStatus)) {
+        return <p className="text-gray-500">No time-in-status data available.</p>;
+    }
+    const { byGroup, byStatus } = timeData;
+    if (byGroup.length === 0 && byStatus.length === 0) {
+       return <p className="text-gray-500">No time-in-status data processed.</p>;
+    }
+
+    // --- Data Preparation ---
+    // Create a quick lookup map: groupName -> [statusId1, statusId2, ...]
+    const groupToStatusIdsMap = useMemo(() => {
+        const map = new Map();
+        if (Array.isArray(statusGroups)) {
+            statusGroups.forEach(group => {
+                if (group.name && Array.isArray(group.statuses)) {
+                    map.set(group.name, new Set(group.statuses.map(String))); // Ensure IDs are strings
+                }
+            });
+        }
+        return map;
+    }, [statusGroups]);
+
+    // Create a map for quick lookup of status data by ID
+    const statusDataMap = useMemo(() => {
+        const map = new Map();
+        byStatus.forEach(status => {
+            map.set(String(status.id), status); // Ensure key is string
+        });
+        return map;
+    }, [byStatus]);
+
+    // --- Handlers ---
+    const toggleGroup = (groupName) => {
+        setExpandedGroups(prev => {
+            const next = new Set(prev);
+            if (next.has(groupName)) {
+                next.delete(groupName);
+            } else {
+                next.add(groupName);
+            }
+            return next;
+        });
+    };
+
+    // --- Rendering ---
+    const renderRow = (item, isGroup, isExpanded = false, indent = false) => {
+        const name = isGroup ? item.groupName : item.name;
+        const avgHours = (typeof item.avgHours === 'number' ? item.avgHours : 0).toFixed(2);
+        const avgDays = (typeof item.avgDays === 'number' ? item.avgDays : 0).toFixed(2);
+        const totalHours = (typeof item.totalHours === 'number' ? item.totalHours : 0).toFixed(2);
+        const key = isGroup ? `group-${name}` : `status-${item.id}`;
+
+        return (
+            <tr key={key} className={indent ? "bg-gray-50 hover:bg-gray-100" : "hover:bg-gray-50"}>
+                {/* Name Column with Indent and Expander */}
+                <td className={`whitespace-nowrap px-6 py-3 text-sm ${indent ? 'pl-10' : 'pl-6'} ${isGroup ? 'font-medium text-gray-900 cursor-pointer' : 'text-gray-700'}`}
+                    onClick={isGroup ? () => toggleGroup(name) : undefined}
+                    title={isGroup ? `Click to ${isExpanded ? 'collapse' : 'expand'}` : name}
+                    >
+                    {isGroup && (
+                        <ExpandIcon expanded={isExpanded} />
+                    )}
+                    <span className={isGroup ? "ml-1" : ""}>{name || (isGroup ? 'Unnamed Group' : 'Unnamed Status')}</span>
+                </td>
+                {/* Metric Columns */}
+                <td className="whitespace-nowrap px-6 py-3 text-sm text-gray-700">{avgHours}</td>
+                <td className="whitespace-nowrap px-6 py-3 text-sm text-gray-700">{avgDays}</td>
+                <td className="whitespace-nowrap px-6 py-3 text-sm text-gray-500">{totalHours}</td>
+            </tr>
+        );
+    };
+
+    return (
+        <div className="overflow-x-auto">
+            <div className="inline-block min-w-full align-middle">
+                <div className="overflow-hidden rounded-lg border shadow">
+                    <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50">
+                            <tr>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 w-1/3"> {/* Added width hint */}
+                                    Status Group / Status
+                                </th>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                                    Avg. Time (Hours)
+                                </th>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                                    Avg. Time (Days)
+                                </th>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                                    Total Time (Hours)
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200 bg-white">
+                            {byGroup.map((group) => {
+                                const isExpanded = expandedGroups.has(group.groupName);
+                                const groupStatusIds = groupToStatusIdsMap.get(group.groupName) || new Set();
+                                const childStatuses = byStatus.filter(s => groupStatusIds.has(String(s.id)));
+
+                                return (
+                                    <React.Fragment key={`fragment-${group.groupName}`}>
+                                        {renderRow(group, true, isExpanded, false)}
+                                        {isExpanded && childStatuses.map(status => (
+                                            renderRow(status, false, false, true) // Render child status rows with indent
+                                        ))}
+                                    </React.Fragment>
+                                );
+                            })}
+                             {/* Optionally render statuses that didn't belong to any group */}
+                             {/* {byStatus.filter(s => !statusToGroupMap.has(String(s.id))).map(status => (
+                                renderRow(status, false, false, false) // Render ungrouped statuses without indent
+                             ))} */}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
-      </div>
-    </div>
-  );
+    );
 }
 
 export default TimeInStatusTable;
