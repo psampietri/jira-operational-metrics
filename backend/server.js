@@ -1,7 +1,10 @@
 /*
  * JiraMetricsDashboard - Backend Server
  * Handles Jira proxying and saving/loading views to MongoDB.
- * Corrected Jira ticket fetching logic to use /search endpoint and proper pagination.
+ * Implements the standard two-step fetch:
+ * 1. POST /search/jql (params in query, body has JQL) fetching id,key paginated.
+ * 2. GET /issue/{issueIdOrKey}?expand=changelog for each result from Step 1.
+ * Uses standard pagination termination (issues.length < MAX_RESULTS).
  */
 
 // Use ES module imports
@@ -13,12 +16,12 @@ import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
 import mongoose from 'mongoose';
-import View from './models/View.js';
+import View from './models/View.js'; // Ensure this path is correct
 
 // --- Environment Setup ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env') }); // Load .env from root
 
 const app = express();
 const PORT = process.env.BACKEND_PORT || 3001;
@@ -27,9 +30,19 @@ const PORT = process.env.BACKEND_PORT || 3001;
 const { JIRA_API_URL_BASE, JIRA_SESSION_TOKEN, JIRA_MAX_RESULTS, MONGO_URI } =
   process.env;
 
-if (!JIRA_API_URL_BASE || !JIRA_SESSION_TOKEN) { /* ... fatal error ... */ process.exit(1); }
-if (!MONGO_URI) { /* ... fatal error ... */ process.exit(1); }
+// Basic validation for essential variables
+if (!JIRA_API_URL_BASE || !JIRA_SESSION_TOKEN) {
+  console.error(
+    '[FATAL ERROR] Missing JIRA_API_URL_BASE or JIRA_SESSION_TOKEN in .env file.',
+  );
+  process.exit(1);
+}
+if (!MONGO_URI) {
+  console.error('[FATAL ERROR] Missing MONGO_URI in .env file.');
+  process.exit(1);
+}
 
+// Parse MAX_RESULTS with fallback
 let MAX_RESULTS_PARSED = parseInt(JIRA_MAX_RESULTS || '50', 10);
 if (isNaN(MAX_RESULTS_PARSED) || MAX_RESULTS_PARSED <= 0) {
     console.warn(`[WARN] Invalid JIRA_MAX_RESULTS. Defaulting to 50.`);
@@ -38,174 +51,317 @@ if (isNaN(MAX_RESULTS_PARSED) || MAX_RESULTS_PARSED <= 0) {
 const MAX_RESULTS = MAX_RESULTS_PARSED;
 
 // --- Middleware ---
-app.use(cors());
-app.use(express.json());
+app.use(cors()); // Enable CORS
+app.use(express.json()); // Parse JSON bodies
 
 // --- MongoDB Connection ---
 mongoose
   .connect(MONGO_URI)
   .then(() => console.log('[INFO] MongoDB Connected Successfully.'))
-  .catch((err) => { /* ... fatal error ... */ process.exit(1); });
+  .catch((err) => {
+    console.error('[FATAL ERROR] MongoDB Connection Failed:', err.message);
+    process.exit(1);
+  });
 
 // --- Axios Client (Jira) ---
 const jiraApi = axios.create({
   baseURL: JIRA_API_URL_BASE,
   headers: {
     'Content-Type': 'application/json',
-    Cookie: `tenant.session.token=${JIRA_SESSION_TOKEN}`,
+    Cookie: `tenant.session.token=${JIRA_SESSION_TOKEN}`, // Authentication cookie
   },
-  timeout: 30000,
+  timeout: 30000, // Timeout for requests
 });
 
 // --- Jira API Routes ---
 
 // GET /api/jira/metadata
 app.get('/api/jira/metadata', async (req, res) => {
-  // ... (existing metadata route - unchanged) ...
-  const { projectKey } = req.query;
-  console.log(`[INFO] /api/jira/metadata: Request for project: ${projectKey || 'NONE'}`);
-  if (!projectKey) { return res.status(400).json({ error: 'projectKey query param is required' }); }
-  try {
-    const projectDetailsUrl = `/rest/api/3/project/${projectKey}`;
-    const prioritiesUrl = '/rest/api/3/priority';
-    const statusesUrl = `/rest/api/3/project/${projectKey}/statuses`;
-    console.log(`[DEBUG] /api/jira/metadata: Fetching URLs for ${projectKey}`);
-    const [projectDetailsRes, prioritiesRes, statusesRes] = await Promise.all([
-      jiraApi.get(projectDetailsUrl), jiraApi.get(prioritiesUrl), jiraApi.get(statusesUrl),
-    ]);
-    const formattedStatuses = (statusesRes.data || [])
-        .flatMap(issueType => issueType.statuses || [])
-        .map(status => ({ id: status.id, name: status.name }))
-        .filter((value, index, self) => index === self.findIndex((s) => s.id === value.id))
-        .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    res.json({
-      issueTypes: projectDetailsRes.data?.issueTypes || [],
-      priorities: prioritiesRes.data || [],
-      statuses: formattedStatuses,
-    });
-    console.log(`[INFO] /api/jira/metadata: Success for project: ${projectKey}`);
-  } catch (error) {
-    console.error(`[ERROR] /api/jira/metadata: Fetch error for project ${projectKey}:`, error.response?.data || error.message);
-    const status = error.response?.status || 500;
-    res.status(status).json({ error: `Failed to fetch Jira metadata. ${error.response?.data?.errorMessages?.join(' ') || error.message}`});
-  }
+    const { projectKey } = req.query;
+    console.log(`[INFO] /api/jira/metadata: Request for project: ${projectKey || 'NONE'}`);
+    if (!projectKey) { return res.status(400).json({ error: 'projectKey query param is required' }); }
+    try {
+      // Define URLs for necessary metadata endpoints
+      const projectDetailsUrl = `/rest/api/3/project/${projectKey}`;
+      const prioritiesUrl = '/rest/api/3/priority';
+      const statusesUrl = `/rest/api/3/project/${projectKey}/statuses`; // Statuses per project
+
+      console.log(`[DEBUG] /api/jira/metadata: Fetching URLs for ${projectKey}`);
+      // Fetch all metadata concurrently
+      const [projectDetailsRes, prioritiesRes, statusesRes] = await Promise.all([
+        jiraApi.get(projectDetailsUrl),
+        jiraApi.get(prioritiesUrl),
+        jiraApi.get(statusesUrl),
+      ]);
+
+      // Process statuses: flatten, deduplicate, and sort
+      const formattedStatuses = (statusesRes.data || [])
+          .flatMap(issueType => issueType.statuses || []) // Get statuses from all issue types
+          .map(status => ({ id: status.id, name: status.name })) // Extract id and name
+          .filter((value, index, self) => index === self.findIndex((s) => s.id === value.id)) // Deduplicate by ID
+          .sort((a, b) => (a.name || '').localeCompare(b.name || '')); // Sort alphabetically
+
+      // Send combined metadata to frontend
+      res.json({
+        issueTypes: projectDetailsRes.data?.issueTypes || [],
+        priorities: prioritiesRes.data || [],
+        statuses: formattedStatuses,
+      });
+      console.log(`[INFO] /api/jira/metadata: Success for project: ${projectKey}`);
+    } catch (error) {
+      // Handle errors during metadata fetch
+      console.error(`[ERROR] /api/jira/metadata: Fetch error for project ${projectKey}:`, error.response?.data || error.message);
+      const status = error.response?.status || 500;
+      const errorMessage = error.response?.data?.errorMessages?.join(' ') || error.message || 'Failed to fetch Jira metadata';
+      res.status(status).json({ error: errorMessage });
+    }
 });
 
-// POST /api/jira/tickets
+
+// POST /api/jira/tickets (Implements Standard Two-Step Fetch)
 app.post('/api/jira/tickets', async (req, res) => {
   const { projectKey, jqlFilter } = req.body;
   console.log(`[INFO] /api/jira/tickets: Request for project: ${projectKey || 'NONE'}`);
-  if (!projectKey) { return res.status(400).json({ error: 'projectKey is required' }); }
+  if (!projectKey) {
+    console.warn('[WARN] /api/jira/tickets: Request failed (400) - projectKey is required');
+    return res.status(400).json({ error: 'projectKey is required' });
+  }
 
-  // Ensure projectKey is included in JQL
+  // Construct the final JQL query
   const finalJql = `project = "${projectKey}" ${jqlFilter ? `AND (${jqlFilter})` : ''} ORDER BY created DESC`;
   console.log(`[INFO] /api/jira/tickets: Executing JQL: ${finalJql}`);
 
-  let allIssueDetails = [];
-  let issueReferences = [];
-  let startAt = 0;
-  let isLastSearchPage = false;
-  const MAX_CONCURRENT_DETAILS = 10;
-  let safetyBreak = 0; // Keep safety break
+  let issueReferences = []; // Stores basic info (id, key) from search
+  let allIssueDetails = []; // Stores full details fetched later
+  let startAt = 0;          // Pagination offset
+  let keepFetching = true;  // Flag to control the pagination loop
+  let safetyBreak = 0;      // Prevent accidental infinite loops
 
   try {
-    // --- STEP 1: Paginate using the CORRECT /search endpoint ---
-    console.log(`[INFO] /api/jira/tickets: Step 1 - Fetching issue references via /search...`);
-    const searchUrl = '/rest/api/3/search'; // Use the standard search endpoint
+    // --- STEP 1: Paginate through search results to get Issue IDs/Keys ---
+    console.log(`[INFO] /api/jira/tickets: Starting Step 1 - Fetching issue references...`);
+    const searchUrlBase = '/rest/api/3/search/jql'; // Correct endpoint for POST search
 
-    while (!isLastSearchPage && safetyBreak < 1000) {
+    while (keepFetching && safetyBreak < 1000) { // Loop until last page or safety break
         safetyBreak++;
-        // --- Payload includes jql, startAt, maxResults, fields ---
-        const payload = {
-            jql: finalJql,
-            startAt: startAt,
-            maxResults: MAX_RESULTS,
-            fields: ["key"] // Only need the key initially
-        };
+        // Construct URL with query parameters for pagination and fields
+        const searchParams = new URLSearchParams({
+            startAt: startAt.toString(),
+            maxResults: MAX_RESULTS.toString(),
+            fields: 'id,key', // Request only essential fields for this step
+        });
+        const searchUrl = `${searchUrlBase}?${searchParams.toString()}`;
+
+        // Construct the request body containing only the JQL query
+        const payload = { jql: finalJql };
 
         console.log(`[DEBUG] /api/jira/tickets: Step 1.${safetyBreak} - Calling POST ${searchUrl} (startAt: ${startAt})`);
         try {
+            // Make the API call to Jira
             const response = await jiraApi.post(searchUrl, payload);
-            const issues = response.data?.issues || [];
-            const totalFound = response.data?.total; // Get total from response
+            const issues = response.data?.issues || []; // Extract issues from response
+            const issuesCountInPage = issues.length;    // Count issues returned in this page
 
             // Validate response structure
-            if (!Array.isArray(response.data?.issues) || typeof totalFound !== 'number') {
-                console.warn(`[WARN] /api/jira/tickets: Step 1 - Invalid response structure from /search. Stopping.`, response.data);
-                isLastSearchPage = true; // Stop if structure is wrong
+            if (!Array.isArray(issues)) {
+                 console.warn(`[WARN] /api/jira/tickets: Step 1 - Invalid response structure (expected 'issues' array). Stopping.`, response.data);
+                 keepFetching = false; // Stop the loop
             } else {
-                issueReferences = issueReferences.concat(issues);
-                console.log(`[INFO] /api/jira/tickets: Step 1 - Fetched page. Got ${issues.length} issues. Total refs now: ${issueReferences.length} / ${totalFound}`);
+                 // Add fetched references to the list
+                 if (issuesCountInPage > 0) {
+                    issueReferences = issueReferences.concat(issues);
+                    console.log(`[INFO] /api/jira/tickets: Step 1 - Fetched page. Got ${issuesCountInPage}. Total refs now: ${issueReferences.length}`);
+                 }
 
-                // --- FIX: Correct Pagination Termination ---
-                // Stop if startAt + fetched count >= total OR if fetched count is 0
-                if ((startAt + issues.length >= totalFound) || issues.length === 0) {
-                    isLastSearchPage = true;
-                    console.log(`[DEBUG] /api/jira/tickets: Step 1 - Last page condition met (startAt:${startAt} + issues:${issues.length} >= total:${totalFound} or issues:0).`);
-                } else {
-                    startAt += issues.length; // Prepare for the next page ONLY if not last
-                }
-                // --- End FIX ---
+                 // --- STANDARD PAGINATION TERMINATION LOGIC ---
+                 // Stop if the number of issues returned is less than the number requested
+                 // OR if exactly zero issues were returned (covers all termination cases).
+                 if (issuesCountInPage < MAX_RESULTS || issuesCountInPage === 0) {
+                    keepFetching = false; // Stop the loop
+                    if (issuesCountInPage < MAX_RESULTS && issuesCountInPage > 0) {
+                        console.log(`[DEBUG] /api/jira/tickets: Step 1 - Last page detected (returned ${issuesCountInPage} < max ${MAX_RESULTS}).`);
+                    } else if (issuesCountInPage === 0) {
+                         console.log(`[DEBUG] /api/jira/tickets: Step 1 - Last page confirmed (returned 0 issues on page starting at ${startAt}).`);
+                    }
+                 }
+                 // --- END STANDARD LOGIC ---
+
+                 // Increment startAt for the *next* page request ONLY if we need to keep fetching
+                 if (keepFetching) {
+                    startAt += MAX_RESULTS; // Standard way to advance pagination index for the next request
+                    console.log(`[DEBUG] /api/jira/tickets: Step 1 - Incremented startAt for next request to ${startAt}`);
+                 }
             }
         } catch (searchError) {
-            console.error(`[ERROR] /api/jira/tickets: Step 1 - Error during JQL search:`, searchError.response?.data || searchError.message);
-            searchError.jql = finalJql; // Attach JQL for context
-            throw searchError;
+             // Handle errors during the search API call
+             console.error(`[ERROR] /api/jira/tickets: Step 1 - Payload sent:`, JSON.stringify(payload));
+             console.error(`[ERROR] /api/jira/tickets: Step 1 - Error during JQL search:`, searchError.response?.data || searchError.message);
+             searchError.jql = finalJql; // Attach JQL for context in outer catch
+             throw searchError; // Re-throw to be caught by the main try/catch block
         }
+        // Safety break check
         if (safetyBreak >= 1000) {
-             console.error("[FATAL ERROR] /api/jira/tickets: Step 1 - Safety break triggered.");
-             throw new Error("Pagination safety break triggered.");
+            console.error("[FATAL ERROR] /api/jira/tickets: Step 1 - Safety break triggered during search pagination.");
+            throw new Error("Pagination safety break triggered during search.");
         }
-    }
+    } // End while loop for Step 1
     console.log(`[INFO] /api/jira/tickets: Finished Step 1 - Found ${issueReferences.length} total issue references.`);
 
-    // --- STEP 2: Fetch full details (No changes needed here) ---
+    // --- STEP 2: Fetch full details for each issue reference ---
     if (issueReferences.length > 0) {
-        // ... (existing detail fetching logic using Promise.allSettled) ...
-        console.log(`[INFO] /api/jira/tickets: Step 2 - Fetching details for ${issueReferences.length} issues...`);
-        let fetchErrorsCount = 0;
-        const detailPromises = issueReferences.map(issueRef => {
-            const issueIdOrKey = issueRef.key || issueRef.id;
-            if (!issueIdOrKey) { /* ... warning ... */ return Promise.resolve({ data: null, error: 'Missing issue key/id', ref: issueRef }); }
-            const issueUrl = `/rest/api/3/issue/${issueIdOrKey}?expand=changelog`;
-            return jiraApi.get(issueUrl)
-                .catch(err => { /* ... error handling ... */ fetchErrorsCount++; return { data: null, error: err.response?.data || err.message, key: issueIdOrKey }; });
-        });
-        console.log(`[DEBUG] /api/jira/tickets: Step 2 - Awaiting ${detailPromises.length} detail requests...`);
-        const results = await Promise.allSettled(detailPromises);
-        console.log(`[DEBUG] /api/jira/tickets: Step 2 - Detail requests finished.`);
-        results.forEach((result, index) => { /* ... processing results ... */
-             const refKey = issueReferences[index]?.key || issueReferences[index]?.id;
-             if (result.status === 'fulfilled' && result.value?.data) { if (!result.value.error) { allIssueDetails.push(result.value.data); } }
-             else if (result.status === 'rejected') { console.error(`[ERROR] /api/jira/tickets: Step 2 - Uncaught rejection for ${refKey || 'Unknown'}:`, result.reason); if (!result.reason?.key) fetchErrorsCount++; }
-         });
-        console.log(`[INFO] /api/jira/tickets: Finished Step 2 - Success: ${allIssueDetails.length}, Failed: ${fetchErrorsCount}.`);
+      console.log(`[INFO] /api/jira/tickets: Starting Step 2 - Fetching full details for ${issueReferences.length} issues...`);
+      // Create an array of promises for fetching details concurrently
+      const issueDetailPromises = issueReferences.map(issueRef => {
+        const issueIdOrKey = issueRef.key || issueRef.id; // Use key if available, else id
+        // Skip if neither id nor key is present
+        if (!issueIdOrKey) {
+            console.warn(`[WARN] /api/jira/tickets: Step 2 - Found issue reference without id or key:`, issueRef);
+            return Promise.resolve({ data: null, error: 'Missing id/key', ref: issueRef }); // Return error structure
+        }
+        // Construct URL for individual issue details, expanding changelog
+        const issueUrl = `/rest/api/3/issue/${issueIdOrKey}?expand=changelog`;
+        return jiraApi.get(issueUrl)
+            // Catch errors for *individual* GET requests
+            .catch(err => {
+                console.error(`[ERROR] /api/jira/tickets: Step 2 - Failed GET for issue ${issueIdOrKey}:`, err.response?.data || err.message);
+                // Return an error structure instead of rejecting the promise immediately
+                return { data: null, error: err.response?.data || err.message, key: issueIdOrKey };
+            });
+      });
+
+      // Execute all detail fetch promises using Promise.allSettled
+      // Consider adding batching here if rate limits become an issue for large numbers
+      console.log(`[DEBUG] /api/jira/tickets: Step 2 - Awaiting ${issueDetailPromises.length} detail requests...`);
+      const detailedIssuesResults = await Promise.allSettled(issueDetailPromises);
+      console.log(`[DEBUG] /api/jira/tickets: Step 2 - Detail requests finished.`);
+
+      let fetchErrorsCount = 0;
+      // Process the results of Promise.allSettled
+      detailedIssuesResults.forEach((result, index) => {
+        const originalRef = issueReferences[index]; // For logging context
+        // Check if promise was fulfilled AND the result contains valid data (not our custom error structure)
+        if (result.status === 'fulfilled' && result.value?.data && !result.value.error) {
+            allIssueDetails.push(result.value.data); // Add successful result
+        } else {
+            // Handle rejected promises or caught API errors
+            fetchErrorsCount++;
+            const reason = result.status === 'rejected' ? result.reason : result.value?.error; // Get error reason
+            const key = originalRef?.key || originalRef?.id || 'unknown';
+            console.error(`[ERROR] /api/jira/tickets: Step 2 - Failed to process details for issue ${key}:`, reason);
+        }
+      });
+      console.log(`[INFO] /api/jira/tickets: Finished Step 2 - Successfully got details for ${allIssueDetails.length}. Failed for ${fetchErrorsCount}.`);
+
     } else {
-        console.log(`[INFO] /api/jira/tickets: Step 2 - Skipped fetching details (0 refs).`);
+      // Skip Step 2 if no issue references were found in Step 1
+      console.log(`[INFO] /api/jira/tickets: Step 2 - Skipped fetching details (0 issue refs found).`);
     }
 
     // --- Return Results ---
-    console.log(`[INFO] /api/jira/tickets: Request complete. Returning ${allIssueDetails.length} issues for project: ${projectKey}`);
+    console.log(`[INFO] /api/jira/tickets: Request complete. Returning ${allIssueDetails.length} detailed issues for project: ${projectKey}`);
     res.json({
-        issues: allIssueDetails,
-        total: allIssueDetails.length,
+      issues: allIssueDetails,         // Send the array of full issue details
+      total: allIssueDetails.length, // Total count is based on successfully fetched details
     });
 
-  } catch (error) { // Outer catch
+  } catch (error) { // Outer catch block for errors in Step 1 or setup
     console.error(`[ERROR] /api/jira/tickets: Unhandled error during process for project ${projectKey}:`, error.response?.data || error.message);
-    if(error.jql) console.error(`[ERROR] JQL was: ${error.jql}`);
+    if (error.jql) console.error(`[ERROR] JQL was: ${error.jql}`); // Log JQL if attached to error
     const status = error.response?.status || 500;
-    const errorMessage = error.response?.data?.errorMessages?.join(' ') || error.response?.data?.error || error.message || 'Failed to fetch Jira ticket data';
+    // Extract meaningful error message from Jira response or error object
+    const errorMessage = error.response?.data?.errorMessages?.join(' ')
+                      || (typeof error.response?.data?.errors === 'object' ? JSON.stringify(error.response.data.errors) : error.response?.data?.errors)
+                      || error.response?.data?.error
+                      || error.message
+                      || 'Failed to fetch Jira ticket data';
     res.status(status).json({ error: errorMessage });
   }
 });
 
 
-// --- Saved View API Routes (Unchanged) ---
-app.get('/api/views', async (req, res) => { /* ... */ });
-app.post('/api/views', async (req, res) => { /* ... */ });
-app.get('/api/views/:id', async (req, res) => { /* ... */ });
-app.delete('/api/views/:id', async (req, res) => { /* ... */ });
+// --- Saved View API Routes ---
+// GET /api/views - Fetch all view names and IDs
+app.get('/api/views', async (req, res) => {
+  console.log("[INFO] /api/views: Request to fetch all views.");
+  try {
+    // Select only _id and name, sort by name
+    const views = await View.find().select('_id name').sort({ name: 1 });
+    res.json(views);
+  } catch (error) {
+    console.error("[ERROR] /api/views: Failed to fetch views:", error.message);
+    res.status(500).json({ error: "Failed to fetch views" });
+  }
+});
+
+// POST /api/views - Save or Update (upsert) a view by name
+app.post('/api/views', async (req, res) => {
+  const viewConfig = req.body;
+  console.log(`[INFO] /api/views: Request to save view: ${viewConfig.name}`);
+  if (!viewConfig.name) {
+    return res.status(400).json({ error: "View name is required" });
+  }
+  try {
+    // Find view by name and update, or create if it doesn't exist
+    const newView = await View.findOneAndUpdate(
+      { name: viewConfig.name }, // Unique key for upsert
+      viewConfig,               // Data to save/update
+      { new: true, upsert: true, runValidators: true } // Options
+    );
+    res.status(201).json(newView); // Return the saved/updated view
+  } catch (error) {
+    // Handle potential duplicate name errors if upsert somehow fails (shouldn't happen with unique index)
+    if (error.code === 11000) {
+      console.warn(`[WARN] /api/views: Duplicate view name attempt (should have been upserted): ${viewConfig.name}`);
+      return res.status(409).json({ error: `View name "${viewConfig.name}" already exists.` });
+    }
+    console.error("[ERROR] /api/views: Failed to save view:", error.message);
+    res.status(500).json({ error: "Failed to save view" });
+  }
+});
+
+// GET /api/views/:id - Fetch a single view's full configuration by ID
+app.get('/api/views/:id', async (req, res) => {
+  const { id } = req.params;
+  console.log(`[INFO] /api/views/${id}: Request to fetch view by ID.`);
+  try {
+    // Validate if the ID is a valid MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({ error: "Invalid view ID format" });
+    }
+    const view = await View.findById(id); // Fetch by ID
+    if (!view) {
+      // If view with that ID doesn't exist
+      return res.status(404).json({ error: "View not found" });
+    }
+    res.json(view); // Return the full view configuration
+  } catch (error) {
+    console.error(`[ERROR] /api/views/${id}: Failed to fetch view:`, error.message);
+    res.status(500).json({ error: "Failed to fetch view" });
+  }
+});
+
+// DELETE /api/views/:id - Delete a view by ID
+app.delete('/api/views/:id', async (req, res) => {
+  const { id } = req.params;
+  console.log(`[INFO] /api/views/${id}: Request to DELETE view by ID.`);
+  try {
+     // Validate ID format
+     if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({ error: "Invalid view ID format" });
+    }
+    // Attempt to find and delete the view by ID
+    const result = await View.findByIdAndDelete(id);
+    if (!result) {
+      // If no view was found with that ID
+      return res.status(404).json({ error: "View not found" });
+    }
+    // Send success message
+    res.json({ message: "View deleted successfully" });
+  } catch (error) {
+    console.error(`[ERROR] /api/views/${id}: Failed to delete view:`, error.message);
+    res.status(500).json({ error: "Failed to delete view" });
+  }
+});
 
 
 // --- Server Start ---
@@ -214,4 +370,3 @@ app.listen(PORT, () => {
     `[INFO] JiraMetricsDashboard Backend listening on http://localhost:${PORT}`,
   );
 });
-

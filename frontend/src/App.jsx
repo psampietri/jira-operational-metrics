@@ -232,25 +232,27 @@ function App() {
      // 1. An explicit fetch was triggered (button click or view load)
      // 2. Project key is set
      // 3. Metadata is loaded and valid for the current project key
-     // 4. Not currently loading anything (metadata or issues)
+     // 4. Not currently loading metadata (isMetadataLoading)
      const metadataIsValid = metadata && !metadataError && !isMetadataLoading && metadata.projectKeyFromLoad === projectKey;
-     const shouldFetch = explicitFetchTriggered.current && projectKey && metadataIsValid && !isLoading;
+     
+     // REMOVED !isLoading from this condition
+     const shouldFetch = explicitFetchTriggered.current && projectKey && metadataIsValid; 
 
      if (shouldFetch) {
          console.log("[useEffect FetchIssues] Conditions met, explicit trigger detected. Calling handleFilterSubmit.");
          explicitFetchTriggered.current = false; // Reset the trigger flag
          handleFilterSubmit(); // Call the actual fetch logic
      } else if (explicitFetchTriggered.current) {
-         console.log("[useEffect FetchIssues] Explicit trigger detected, but conditions not met.", { projectKey, metadataIsValid, isLoading });
+         console.log("[useEffect FetchIssues] Explicit trigger detected, but conditions not met.", { projectKey, metadataIsValid, isMetadataLoading });
          // If conditions aren't met, reset the trigger so we don't fetch later unexpectedly
          explicitFetchTriggered.current = false;
-         // Ensure loading stops if trigger happened but couldn't fetch
-         if(isLoading) setIsLoading(false);
+         
          // Set an appropriate error if needed
          if (!projectKey) setError("Cannot fetch issues: Project key is missing.");
          else if (!metadataIsValid) setError("Cannot fetch issues: Metadata is missing or failed to load.");
      }
- }, [projectKey, metadata, metadataError, isMetadataLoading, isLoading, handleFilterSubmit, explicitFetchTriggered.current]); // Depend on the ref's value
+ // REMOVED isLoading from the dependency array
+ }, [projectKey, metadata, metadataError, isMetadataLoading, handleFilterSubmit, explicitFetchTriggered.current]);
 
 
   // Effect to process metrics
