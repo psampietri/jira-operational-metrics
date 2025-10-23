@@ -2,11 +2,12 @@
  * JiraMetricsDashboard - FilterPanel.jsx
  *
  * This component provides two key functions:
- * 1. Standard JQL filters (Issue Type, Priority).
+ * 1. Standard JQL filters (Issue Type, Priority, Dates).
  * 2. The critical "Status Grouping" UI.
  *
  * The Status Grouping UI allows a user to assign a custom "Group Name"
  * to each raw Jira status.
+ * State for standard filters (dates, types, priorities) is managed in App.jsx.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -15,71 +16,70 @@ function FilterPanel({
   metadata,
   statusGroups,
   onStatusGroupsChange,
-  onFilterSubmit,
+  onFilterSubmit, // This now triggers the submit in App.jsx
   isLoading,
+  // Date props
+  startDate,
+  endDate,
+  onStartDateChange,
+  onEndDateChange,
+  // Standard Filter props
+  standardFilters,
+  onStandardFiltersChange,
 }) {
-  // --- State ---
-  // State for standard filters
-  const [localFilters, setLocalFilters] = useState({
-    issueTypes: [],
-    priorities: [],
-  });
-
-  // State for the status grouping UI.
-  // We store a simple map of { statusId: 'groupName' } for the inputs.
+  // State for the status grouping UI remains local to this component
   const [groupNameMap, setGroupNameMap] = useState({});
 
-  // --- Effects ---
-  // When metadata or the canonical statusGroups (from App.jsx) change,
-  // we rebuild the local groupNameMap for the input fields.
+  // Effect for updating groupNameMap remains the same
   useEffect(() => {
-    if (metadata && metadata.statuses) {
+    if (metadata && Array.isArray(metadata.statuses)) {
       const newMap = {};
-      // First, map all statuses to a default group name (their own name)
       metadata.statuses.forEach((s) => {
-        newMap[s.id] = s.name;
+         if (s && s.id != null) {
+           newMap[String(s.id)] = s.name || '';
+         }
       });
-      // Then, overwrite with the custom group names from props
-      statusGroups.forEach((group) => {
-        group.statuses.forEach((statusId) => {
-          newMap[statusId] = group.name;
-        });
-      });
+      if (Array.isArray(statusGroups)) {
+          statusGroups.forEach((group) => {
+            if (group && group.name != null && Array.isArray(group.statuses)) {
+              group.statuses.forEach((statusId) => {
+                if (statusId != null) {
+                    newMap[String(statusId)] = group.name;
+                }
+              });
+            }
+          });
+       } else {
+            console.warn('[FilterPanel useEffect] statusGroups prop is not an array:', statusGroups);
+       }
       setGroupNameMap(newMap);
+    } else {
+       setGroupNameMap({});
     }
   }, [metadata, statusGroups]);
 
-  // --- Handlers ---
 
-  // Handle changes to the standard filter dropdowns
+  // Handle changes to the standard filter dropdowns (Issue Types, Priorities)
   const handleFilterChange = (filterName, selectedOptions) => {
     const values = Array.from(selectedOptions)
       .filter((option) => option.selected)
       .map((option) => option.value);
-    setLocalFilters((prev) => ({ ...prev, [filterName]: values }));
+    // Use the callback prop to update state in App.jsx
+    onStandardFiltersChange((prev) => ({ ...prev, [filterName]: values }));
   };
 
   // Handle "Apply Filters" button click
   const handleSubmitFilters = (e) => {
     e.preventDefault();
-    // 1. Build the JQL filter string
-    const jqlParts = [];
-    if (localFilters.issueTypes.length > 0) {
-      jqlParts.push(`issueType in (${localFilters.issueTypes.map(id => `"${id}"`).join(',')})`);
-    }
-    if (localFilters.priorities.length > 0) {
-      jqlParts.push(`priority in (${localFilters.priorities.map(id => `"${id}"`).join(',')})`);
-    }
-    
-    // 2. Pass JQL string to App.jsx
-    onFilterSubmit(jqlParts.join(' AND '));
+    // Simply call the onFilterSubmit prop - App.jsx handles JQL generation
+    onFilterSubmit();
   };
 
   // Handle typing in one of the "Group Name" input fields
   const handleGroupNameChange = (statusId, newName) => {
     setGroupNameMap((prev) => ({
       ...prev,
-      [statusId]: newName,
+      [String(statusId)]: newName, // Use string ID
     }));
   };
 
@@ -90,17 +90,25 @@ function FilterPanel({
     const groups = {}; // { 'Queue': ['1', '2'], 'In Dev': ['3'] }
 
     Object.entries(groupNameMap).forEach(([statusId, groupName]) => {
-      if (!groups[groupName]) {
-        groups[groupName] = [];
+      // Ensure groupName is treated as a string and trim whitespace
+      const trimmedGroupName = String(groupName || '').trim();
+       if (!trimmedGroupName) {
+           console.warn(`[FilterPanel] Status ID ${statusId} has an empty or invalid group name. Skipping.`);
+           return; // Skip if group name is empty
+       }
+
+      if (!groups[trimmedGroupName]) {
+        groups[trimmedGroupName] = [];
       }
-      groups[groupName].push(statusId);
+      groups[trimmedGroupName].push(statusId); // statusId is already a string key from the map
     });
 
     // Convert map to final array
     const newStatusGroups = Object.entries(groups).map(([name, statuses], i) => ({
-      id: `group-${i}-${name.replace(/\s+/g, '-')}`, // Create a stable-ish ID
-      name,
-      statuses,
+      // Use a more robust ID generation if needed, but this is likely okay
+      id: `group-${i}-${name.replace(/[^a-zA-Z0-9]/g, '-')}`, // Sanitize name for ID
+      name, // Use the trimmed name
+      statuses, // Array of string status IDs
     }));
 
     // Pass the new group definitions up to App.jsx
@@ -118,6 +126,40 @@ function FilterPanel({
           Filters
         </h3>
         <div className="space-y-4">
+           {/* Date Filters */}
+           <div>
+            <label
+              htmlFor="filter-startDate"
+              className="mb-1 block text-sm font-medium text-gray-700"
+            >
+              Created After (Optional)
+            </label>
+            <input
+              type="date"
+              id="filter-startDate"
+              className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+              value={startDate}
+              onChange={(e) => onStartDateChange(e.target.value)}
+              disabled={isLoading || !metadata}
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="filter-endDate"
+              className="mb-1 block text-sm font-medium text-gray-700"
+            >
+              Created Before (Optional)
+            </label>
+            <input
+              type="date"
+              id="filter-endDate"
+              className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+              value={endDate}
+              onChange={(e) => onEndDateChange(e.target.value)}
+              disabled={isLoading || !metadata}
+            />
+          </div>
+
           {/* Issue Types Filter */}
           <div>
             <label
@@ -130,13 +172,16 @@ function FilterPanel({
               id="filter-issueTypes"
               multiple
               className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-              value={localFilters.issueTypes}
+              value={standardFilters.issueTypes} // Use value from props
               onChange={(e) => handleFilterChange('issueTypes', e.target.options)}
+               disabled={!metadata || !Array.isArray(metadata.issueTypes) || isLoading}
             >
               {metadata?.issueTypes?.map((it) => (
-                <option key={it.id} value={it.id}>
-                  {it.name}
-                </option>
+                 it && it.id != null ? (
+                    <option key={it.id} value={it.id}>
+                    {it.name || `Type ${it.id}`}
+                    </option>
+                 ) : null
               ))}
             </select>
           </div>
@@ -153,13 +198,16 @@ function FilterPanel({
               id="filter-priorities"
               multiple
               className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-              value={localFilters.priorities}
+              value={standardFilters.priorities} // Use value from props
               onChange={(e) => handleFilterChange('priorities', e.target.options)}
+               disabled={!metadata || !Array.isArray(metadata.priorities) || isLoading}
             >
               {metadata?.priorities?.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
+                 p && p.id != null ? (
+                    <option key={p.id} value={p.id}>
+                    {p.name || `Priority ${p.id}`}
+                    </option>
+                 ) : null
               ))}
             </select>
           </div>
@@ -167,7 +215,7 @@ function FilterPanel({
           {/* Submit Button */}
           <button
             type="submit"
-            disabled={isLoading}
+            disabled={isLoading || !metadata}
             className="w-full rounded-md border border-transparent bg-blue-600 px-4 py-2 text-base font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-gray-400"
           >
             {isLoading ? 'Loading...' : 'Apply Filters'}
@@ -181,30 +229,38 @@ function FilterPanel({
           Status Groups
         </h3>
         <p className="mb-3 text-sm text-gray-600">
-          Assign raw statuses to a custom group. (e.g., assign "In Review" and
-          "In QA" to a group named "Review").
+          Assign raw statuses to a custom group. Click "Save Groups" to apply changes.
         </p>
-        <div className="max-h-96 space-y-2 overflow-y-auto pr-2">
-          {metadata?.statuses?.map((status) => (
-            <div
-              key={status.id}
-              className="grid grid-cols-2 items-center gap-2"
-            >
-              <span className="truncate text-sm text-gray-700" title={status.name}>
-                {status.name}
-              </span>
-              <input
-                type="text"
-                value={groupNameMap[status.id] || ''}
-                onChange={(e) => handleGroupNameChange(status.id, e.target.value)}
-                className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-              />
-            </div>
-          ))}
-        </div>
+         {metadata?.statuses && Array.isArray(metadata.statuses) && metadata.statuses.length > 0 ? (
+          <div className="max-h-96 space-y-2 overflow-y-auto pr-2">
+            {metadata.statuses.map((status) => (
+               status && status.id != null ? (
+                <div
+                    key={status.id}
+                    className="grid grid-cols-2 items-center gap-2"
+                >
+                    <span className="truncate text-sm text-gray-700" title={status.name}>
+                    {status.name || 'Unnamed Status'}
+                    </span>
+                    <input
+                    type="text"
+                    value={groupNameMap[String(status.id)] || ''}
+                    onChange={(e) => handleGroupNameChange(status.id, e.target.value)}
+                    className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                     disabled={isLoading}
+                    />
+                </div>
+               ) : null
+            ))}
+          </div>
+         ) : (
+          <p className="text-sm text-gray-500">
+             {isLoading ? 'Loading statuses...' : 'No statuses loaded for grouping.'}
+          </p>
+         )}
         <button
           onClick={handleSaveGroups}
-          disabled={isLoading}
+          disabled={isLoading || !metadata || !Array.isArray(metadata.statuses) || metadata.statuses.length === 0}
           className="mt-4 w-full rounded-md border border-transparent bg-green-600 px-4 py-2 text-base font-medium text-white shadow-sm hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-gray-400"
         >
           Save Groups & Re-Process
