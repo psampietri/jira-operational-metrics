@@ -118,10 +118,10 @@ app.get('/api/jira/metadata', async (req, res) => {
 });
 
 
-// POST /api/jira/tickets (Implements Standard Two-Step Fetch)
 app.post('/api/jira/tickets', async (req, res) => {
   const { projectKey, jqlFilter } = req.body;
   console.log(`[INFO] /api/jira/tickets: Request for project: ${projectKey || 'NONE'}`);
+  
   if (!projectKey) {
     console.warn('[WARN] /api/jira/tickets: Request failed (400) - projectKey is required');
     return res.status(400).json({ error: 'projectKey is required' });
@@ -131,41 +131,47 @@ app.post('/api/jira/tickets', async (req, res) => {
   const finalJql = `project = "${projectKey}" ${jqlFilter ? `AND (${jqlFilter})` : ''} ORDER BY created DESC`;
   console.log(`[INFO] /api/jira/tickets: Executing JQL: ${finalJql}`);
 
-  let issueReferences = []; // Stores basic info (id, key) from search
-  let allIssueDetails = []; // Stores full details fetched later
-  let startAt = 0;          // Pagination offset
+  let issueReferences = [];   // Stores basic info (id, key) from search
+  let allIssueDetails = [];   // Stores full details fetched later
+  
+  // ⚡ CRUCIAL CHANGE for Jira API v3 POST /search/jql: Use token instead of offset (startAt)
+  let nextPageToken = null; // Token for cursor-based pagination
   let keepFetching = true;  // Flag to control the pagination loop
   let safetyBreak = 0;      // Prevent accidental infinite loops
 
   try {
     // --- STEP 1: Paginate through search results to get Issue IDs/Keys ---
     console.log(`[INFO] /api/jira/tickets: Starting Step 1 - Fetching issue references...`);
-    const searchUrlBase = '/rest/api/3/search/jql'; // Correct endpoint for POST search
+    const searchUrl = '/rest/api/3/search/jql'; 
 
     while (keepFetching && safetyBreak < 1000) { // Loop until last page or safety break
         safetyBreak++;
-        // Construct URL with query parameters for pagination and fields
-        const searchParams = new URLSearchParams({
-            startAt: startAt.toString(),
-            maxResults: MAX_RESULTS.toString(),
-            fields: 'id,key', // Request only essential fields for this step
-        });
-        const searchUrl = `${searchUrlBase}?${searchParams.toString()}`;
 
-        // Construct the request body containing only the JQL query
-        const payload = { jql: finalJql };
+        const payload = {
+            jql: finalJql,
+            maxResults: MAX_RESULTS,
+            fields: ['id', 'key'] // Minimize payload size
+        };
+        
+        // Include the token only if it exists (i.e., not the first page)
+        if (nextPageToken) {
+            payload.nextPageToken = nextPageToken;
+        }
 
-        console.log(`[DEBUG] /api/jira/tickets: Step 1.${safetyBreak} - Calling POST ${searchUrl} (startAt: ${startAt})`);
+        console.log(`[DEBUG] /api/jira/tickets: Step 1.${safetyBreak} - Calling POST ${searchUrl} (Token: ${nextPageToken ? 'PRESENT' : 'NONE'})`);
+        
         try {
             // Make the API call to Jira
             const response = await jiraApi.post(searchUrl, payload);
             const issues = response.data?.issues || []; // Extract issues from response
             const issuesCountInPage = issues.length;    // Count issues returned in this page
+            
+            // Extract the token for the *next* request
+            nextPageToken = response.data?.nextPageToken || null; 
 
-            // Validate response structure
             if (!Array.isArray(issues)) {
                  console.warn(`[WARN] /api/jira/tickets: Step 1 - Invalid response structure (expected 'issues' array). Stopping.`, response.data);
-                 keepFetching = false; // Stop the loop
+                 keepFetching = false;
             } else {
                  // Add fetched references to the list
                  if (issuesCountInPage > 0) {
@@ -173,107 +179,102 @@ app.post('/api/jira/tickets', async (req, res) => {
                     console.log(`[INFO] /api/jira/tickets: Step 1 - Fetched page. Got ${issuesCountInPage}. Total refs now: ${issueReferences.length}`);
                  }
 
-                 // --- STANDARD PAGINATION TERMINATION LOGIC ---
-                 // Stop if the number of issues returned is less than the number requested
-                 // OR if exactly zero issues were returned (covers all termination cases).
-                 if (issuesCountInPage < MAX_RESULTS || issuesCountInPage === 0) {
-                    keepFetching = false; // Stop the loop
-                    if (issuesCountInPage < MAX_RESULTS && issuesCountInPage > 0) {
-                        console.log(`[DEBUG] /api/jira/tickets: Step 1 - Last page detected (returned ${issuesCountInPage} < max ${MAX_RESULTS}).`);
-                    } else if (issuesCountInPage === 0) {
-                         console.log(`[DEBUG] /api/jira/tickets: Step 1 - Last page confirmed (returned 0 issues on page starting at ${startAt}).`);
-                    }
+                 // --- TOKEN PAGINATION TERMINATION LOGIC ---
+                 // Stop if 'nextPageToken' is null/empty, or if no issues were returned (which also implies the token will be null/empty).
+                 if (!nextPageToken || issuesCountInPage === 0) {
+                    keepFetching = false; 
+                    console.log(`[DEBUG] /api/jira/tickets: Step 1 - Last page detected (Token: ${nextPageToken}, Issues: ${issuesCountInPage}).`);
                  }
-                 // --- END STANDARD LOGIC ---
-
-                 // Increment startAt for the *next* page request ONLY if we need to keep fetching
-                 if (keepFetching) {
-                    startAt += MAX_RESULTS; // Standard way to advance pagination index for the next request
-                    console.log(`[DEBUG] /api/jira/tickets: Step 1 - Incremented startAt for next request to ${startAt}`);
-                 }
+                 // --- END LOGIC ---
             }
         } catch (searchError) {
              // Handle errors during the search API call
              console.error(`[ERROR] /api/jira/tickets: Step 1 - Payload sent:`, JSON.stringify(payload));
              console.error(`[ERROR] /api/jira/tickets: Step 1 - Error during JQL search:`, searchError.response?.data || searchError.message);
-             searchError.jql = finalJql; // Attach JQL for context in outer catch
-             throw searchError; // Re-throw to be caught by the main try/catch block
+             searchError.jql = finalJql; 
+             throw searchError; 
         }
-        // Safety break check
+        
         if (safetyBreak >= 1000) {
             console.error("[FATAL ERROR] /api/jira/tickets: Step 1 - Safety break triggered during search pagination.");
             throw new Error("Pagination safety break triggered during search.");
         }
     } // End while loop for Step 1
+    
     console.log(`[INFO] /api/jira/tickets: Finished Step 1 - Found ${issueReferences.length} total issue references.`);
 
+    // ----------------------------------------------------------------------------------------------------
+    
     // --- STEP 2: Fetch full details for each issue reference ---
     if (issueReferences.length > 0) {
       console.log(`[INFO] /api/jira/tickets: Starting Step 2 - Fetching full details for ${issueReferences.length} issues...`);
+      
       // Create an array of promises for fetching details concurrently
       const issueDetailPromises = issueReferences.map(issueRef => {
-        const issueIdOrKey = issueRef.key || issueRef.id; // Use key if available, else id
-        // Skip if neither id nor key is present
+        const issueIdOrKey = issueRef.key || issueRef.id; 
+        
         if (!issueIdOrKey) {
             console.warn(`[WARN] /api/jira/tickets: Step 2 - Found issue reference without id or key:`, issueRef);
-            return Promise.resolve({ data: null, error: 'Missing id/key', ref: issueRef }); // Return error structure
+            return Promise.resolve({ data: null, error: 'Missing id/key', ref: issueRef });
         }
-        // Construct URL for individual issue details, expanding changelog
+        
+        // Request issue details and expand changelog in a single GET request
         const issueUrl = `/rest/api/3/issue/${issueIdOrKey}?expand=changelog`;
         return jiraApi.get(issueUrl)
-            // Catch errors for *individual* GET requests
             .catch(err => {
                 console.error(`[ERROR] /api/jira/tickets: Step 2 - Failed GET for issue ${issueIdOrKey}:`, err.response?.data || err.message);
-                // Return an error structure instead of rejecting the promise immediately
+                // Return an error structure to allow Promise.allSettled to resolve
                 return { data: null, error: err.response?.data || err.message, key: issueIdOrKey };
             });
       });
 
-      // Execute all detail fetch promises using Promise.allSettled
-      // Consider adding batching here if rate limits become an issue for large numbers
+      // Execute all detail fetch promises (Be mindful of Jira's rate limits here)
       console.log(`[DEBUG] /api/jira/tickets: Step 2 - Awaiting ${issueDetailPromises.length} detail requests...`);
       const detailedIssuesResults = await Promise.allSettled(issueDetailPromises);
       console.log(`[DEBUG] /api/jira/tickets: Step 2 - Detail requests finished.`);
 
       let fetchErrorsCount = 0;
+      
       // Process the results of Promise.allSettled
-      detailedIssuesResults.forEach((result, index) => {
-        const originalRef = issueReferences[index]; // For logging context
-        // Check if promise was fulfilled AND the result contains valid data (not our custom error structure)
+      detailedIssuesResults.forEach(result => {
+        // Check if promise was fulfilled AND the result contains valid data
         if (result.status === 'fulfilled' && result.value?.data && !result.value.error) {
-            allIssueDetails.push(result.value.data); // Add successful result
+            allIssueDetails.push(result.value.data); 
         } else {
             // Handle rejected promises or caught API errors
             fetchErrorsCount++;
-            const reason = result.status === 'rejected' ? result.reason : result.value?.error; // Get error reason
-            const key = originalRef?.key || originalRef?.id || 'unknown';
-            console.error(`[ERROR] /api/jira/tickets: Step 2 - Failed to process details for issue ${key}:`, reason);
+            // The value for a fulfilled promise that contained a custom error structure (from the .catch above)
+            const reason = result.status === 'rejected' ? result.reason : result.value?.error; 
+            console.error(`[ERROR] /api/jira/tickets: Step 2 - Failed to process issue detail:`, reason);
         }
       });
+      
       console.log(`[INFO] /api/jira/tickets: Finished Step 2 - Successfully got details for ${allIssueDetails.length}. Failed for ${fetchErrorsCount}.`);
 
     } else {
-      // Skip Step 2 if no issue references were found in Step 1
       console.log(`[INFO] /api/jira/tickets: Step 2 - Skipped fetching details (0 issue refs found).`);
     }
 
     // --- Return Results ---
     console.log(`[INFO] /api/jira/tickets: Request complete. Returning ${allIssueDetails.length} detailed issues for project: ${projectKey}`);
     res.json({
-      issues: allIssueDetails,         // Send the array of full issue details
-      total: allIssueDetails.length, // Total count is based on successfully fetched details
+      issues: allIssueDetails,         
+      total: allIssueDetails.length, 
     });
 
-  } catch (error) { // Outer catch block for errors in Step 1 or setup
+  } catch (error) { // Outer catch block for critical errors in Step 1 or setup
     console.error(`[ERROR] /api/jira/tickets: Unhandled error during process for project ${projectKey}:`, error.response?.data || error.message);
-    if (error.jql) console.error(`[ERROR] JQL was: ${error.jql}`); // Log JQL if attached to error
+    if (error.jql) console.error(`[ERROR] JQL was: ${error.jql}`); 
+    
     const status = error.response?.status || 500;
-    // Extract meaningful error message from Jira response or error object
+    
+    // Extract meaningful error message from Jira response
     const errorMessage = error.response?.data?.errorMessages?.join(' ')
                       || (typeof error.response?.data?.errors === 'object' ? JSON.stringify(error.response.data.errors) : error.response?.data?.errors)
                       || error.response?.data?.error
                       || error.message
                       || 'Failed to fetch Jira ticket data';
+                      
     res.status(status).json({ error: errorMessage });
   }
 });
