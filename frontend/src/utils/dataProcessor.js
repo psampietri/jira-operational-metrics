@@ -5,10 +5,74 @@
  * Produces detailed status-level data alongside aggregated group-level data.
  */
 
-// --- Date Helpers (getDuration, getPercentile, getDateRange - unchanged) ---
-function getDuration(startDate, endDate, unit) { /* ... */ }
-function getPercentile(sortedArray, percentile) { /* ... */ }
-function getDateRange(startDateStr, endDateStr) { /* ... */ }
+// --- Date Helpers (getDuration, getPercentile, getDateRange - implemented) ---
+/**
+ * Calculates the duration between two Date objects in the specified unit.
+ * @param {Date} startDate
+ * @param {Date} endDate
+ * @param {string} unit - 'ms', 'hours', or 'days'
+ * @returns {number} - Duration in the specified unit.
+ */
+function getDuration(startDate, endDate, unit) {
+    if (!startDate || !endDate) return 0;
+    const diffMs = endDate.getTime() - startDate.getTime();
+    if (diffMs <= 0) return 0;
+
+    switch (unit) {
+        case 'ms': return diffMs;
+        case 'hours': return diffMs / (1000 * 60 * 60);
+        case 'days':
+        default: return diffMs / (1000 * 60 * 60 * 24);
+    }
+}
+
+/**
+ * Calculates the Nth percentile of a sorted array of numbers.
+ * @param {Array<number>} sortedArray - Array of durations, already sorted.
+ * @param {number} percentile - The percentile to calculate (e.g., 50, 85).
+ * @returns {number} - The value at the specified percentile.
+ */
+function getPercentile(sortedArray, percentile) {
+    if (!sortedArray || sortedArray.length === 0) return 0;
+    // Calculate index using ceiling for a robust result, ensuring at least one element is chosen.
+    const index = Math.ceil((percentile / 100) * sortedArray.length) - 1;
+    return sortedArray[Math.max(0, index)];
+}
+
+/**
+ * Generates an array of date strings (YYYY-MM-DD) for every day
+ * between and including the start and end dates.
+ * @param {string} startDateStr - Start date string (YYYY-MM-DD)
+ * @param {string} endDateStr - End date string (YYYY-MM-DD)
+ * @returns {Array<string>} - Array of date strings.
+ */
+function getDateRange(startDateStr, endDateStr) {
+    // Create Date objects from YYYY-MM-DD strings. They are interpreted as midnight UTC.
+    const start = new Date(startDateStr);
+    const end = new Date(endDateStr);
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || start.getTime() > end.getTime()) {
+        return [];
+    }
+
+    const dateArray = [];
+    const currentDate = new Date(start);
+    
+    // Loop through each day.
+    while (currentDate.getTime() <= end.getTime()) {
+        // Format date as YYYY-MM-DD string
+        const dateString = currentDate.toISOString().split('T')[0];
+        dateArray.push(dateString);
+        
+        // Move to the next day. This is a robust way to iterate days across DST changes.
+        currentDate.setDate(currentDate.getDate() + 1);
+        
+        // Safety break for unexpected loops (e.g., max ~2.7 years)
+        if (dateArray.length > 1000) return []; 
+    }
+
+    return dateArray;
+}
 
 // --- NEW Helper: Get Status IDs from Config ---
 /**

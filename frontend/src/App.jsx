@@ -116,8 +116,8 @@ function App() {
    // --- Issue Fetch Logic (now separated) ---
    const handleFilterSubmit = useCallback(async () => {
        // Re-check conditions here, although the trigger points should pre-validate
-       if (!projectKey || !metadata || metadataError || isMetadataLoading || isLoading) {
-           console.warn(`[App] handleFilterSubmit aborted. Conditions: PK=${!!projectKey}, Meta=${!!metadata}, MetaErr=${!!metadataError}, MetaLoad=${isMetadataLoading}, Loading=${isLoading}`);
+       if (!projectKey || !metadata || metadataError || isMetadataLoading ) {
+           console.warn(`[App] handleFilterSubmit aborted. Conditions: PK=${!!projectKey}, Meta=${!!metadata}, MetaErr=${!!metadataError}, MetaLoad=${isMetadataLoading}`);
            // If called incorrectly, ensure loading stops
            if(isLoading) setIsLoading(false);
            return;
@@ -245,8 +245,6 @@ function App() {
      } else if (explicitFetchTriggered.current) {
          console.log("[useEffect FetchIssues] Explicit trigger detected, but conditions not met.", { projectKey, metadataIsValid, isMetadataLoading });
          // If conditions aren't met, reset the trigger so we don't fetch later unexpectedly
-         explicitFetchTriggered.current = false;
-         
          // Set an appropriate error if needed
          if (!projectKey) setError("Cannot fetch issues: Project key is missing.");
          else if (!metadataIsValid) setError("Cannot fetch issues: Metadata is missing or failed to load.");
