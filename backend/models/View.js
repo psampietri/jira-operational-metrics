@@ -1,6 +1,12 @@
 // backend/models/View.js
 import mongoose from 'mongoose';
 
+// --- Define schema for the flow config objects ---
+const flowConfigSchema = new mongoose.Schema({
+  type: { type: String, required: true, enum: ['group', 'status'] },
+  value: { type: String, required: true }, // Store group name or status ID
+}, { _id: false }); // No _id for this sub-schema
+
 const viewSchema = new mongoose.Schema({
   // Use index: true directly in the field definition for uniqueness and indexing
   name: { type: String, required: true, unique: true, index: true },
@@ -19,14 +25,12 @@ const viewSchema = new mongoose.Schema({
       statuses: [String],
     },
   ],
-  triageGroup: { type: String, required: true },
-  cycleStartGroup: { type: String, required: true },
-  cycleEndGroup: { type: String, required: true },
+  // --- UPDATED: Use the flowConfigSchema ---
+  triageConfig: { type: flowConfigSchema, required: true },
+  cycleStartConfig: { type: flowConfigSchema, required: true },
+  cycleEndConfig: { type: flowConfigSchema, required: true },
   createdAt: { type: Date, default: Date.now }
 });
-
-// REMOVED: schema.index({ name: 1 }); - This was the duplicate index definition.
-// The index is now correctly defined within the 'name' field options above.
 
 const View = mongoose.model('View', viewSchema);
 
